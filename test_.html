@@ -243,7 +243,14 @@
         let cameraStarted = false;
         let calibrationData = null;
         let phaseStartTime = Date.now();
-        const MIN_PHASE_DURATION = 300; // milliseconds - prevents false triggers
+        const MIN_PHASE_DURATION = 500; // milliseconds - increased to prevent false triggers
+        
+        // Track which phases were completed in current burpee cycle
+        let phasesCompleted = {
+            squat: false,
+            plank: false,
+            comingUp: false
+        };
 
         // Calibration for personalized thresholds
         let calibratedStandingHeight = null;
@@ -367,17 +374,17 @@
             const avgKneeAngle = (leftKneeAngle + rightKneeAngle) / 2;
 
             // Check if hands are near ground (important for plank detection)
-            const handsLow = wristY > shoulderY + 0.2; // Wrists below shoulders
+            const handsLow = wristY > shoulderY + 0.25; // Stricter - wrists must be well below shoulders
             
-            // Check if body is horizontal (plank position)
-            const isHorizontal = torsoAngle < 30 || torsoAngle > 150;
+            // Check if body is horizontal (plank position) - stricter angle requirement
+            const isHorizontal = (torsoAngle < 25 || torsoAngle > 155) && bodyHeight < 0.25;
             
             // Calculate relative positions (important for mobile/different angles)
             const hipsBelowShoulders = hipY > shoulderY;
             const kneesAboveAnkles = kneeY < ankleY - 0.05;
 
             // Debug info
-            const debugMsg = `Phase: ${currentPhase} | Body Height: ${bodyHeight.toFixed(2)} | Torso Angle: ${torsoAngle.toFixed(1)}° | Knee: ${avgKneeAngle.toFixed(1)}° | Hands Low: ${handsLow}`;
+            const debugMsg = `Phase: ${currentPhase} | Completed: [Squat:${phasesCompleted.squat} Plank:${phasesCompleted.plank} Up:${phasesCompleted.comingUp}] | Knee: ${avgKneeAngle.toFixed(1)}° | Torso: ${torsoAngle.toFixed(1)}°`;
             updateDebug(debugMsg);
 
             // Prevent rapid phase changes
@@ -389,61 +396,81 @@
             // STATE MACHINE for proper burpee detection
             switch (currentPhase) {
                 case 'standing':
-                    // Detect squat down (knees bent, going down)
-                    if (avgKneeAngle < 140 && hipY > shoulderY + 0.15) {
+                    // Detect squat down (knees bent significantly, going down)
+                    // Stricter: knee angle must be < 130 (deeper squat)
+                    if (avgKneeAngle < 130 && hipY > shoulderY + 0.2) {
                         changePhase('squat_down');
-                        statusElement.textContent = 'Going down...';
+                        phasesCompleted.squat = true;
+                        statusElement.textContent = 'Squat down... (1/3)';
                         statusElement.style.color = '#ffd43b';
                     }
                     break;
 
                 case 'squat_down':
                     // Detect plank position (hands on ground, body horizontal)
-                    if (handsLow && isHorizontal && bodyHeight < 0.3) {
+                    // Must have ALL conditions: hands low, horizontal body, AND small body height
+                    if (handsLow && isHorizontal && phasesCompleted.squat) {
                         changePhase('plank');
-                        statusElement.textContent = 'Plank position! 🔥';
+                        phasesCompleted.plank = true;
+                        statusElement.textContent = 'Plank position! 🔥 (2/3)';
                         statusElement.style.color = '#ff6b6b';
                     }
-                    // Allow going back to standing if they stand up without plank
-                    else if (avgKneeAngle > 160 && bodyHeight > 0.35) {
+                    // Allow going back to standing if they stand up without plank (RESET - no count)
+                    else if (avgKneeAngle > 165 && bodyHeight > 0.32) {
                         changePhase('standing');
-                        statusElement.textContent = 'Ready...';
-                        statusElement.style.color = '#666';
+                        resetPhaseTracking();
+                        statusElement.textContent = 'Incomplete - try again';
+                        statusElement.style.color = '#ff8787';
                     }
                     break;
 
                 case 'plank':
                     // Detect coming up (body no longer horizontal, knees bending)
-                    if (!isHorizontal && avgKneeAngle < 150) {
+                    if (!isHorizontal && avgKneeAngle < 145 && phasesCompleted.plank) {
                         changePhase('coming_up');
-                        statusElement.textContent = 'Coming back up...';
+                        phasesCompleted.comingUp = true;
+                        statusElement.textContent = 'Coming back up... (3/3)';
                         statusElement.style.color = '#4dabf7';
                     }
                     break;
 
                 case 'coming_up':
                     // Detect full standing position (knees straight, upright)
-                    if (avgKneeAngle > 160 && bodyHeight > 0.3 && !handsLow) {
-                        changePhase('standing');
-                        
-                        // COUNT THE BURPEE!
-                        burpeeCount++;
-                        countElement.textContent = burpeeCount;
-                        statusElement.textContent = 'Burpee completed! 🎉';
-                        statusElement.style.color = '#51cf66';
+                    // ONLY COUNT if ALL phases were completed
+                    // Stricter: knees must be > 165 degrees (nearly straight)
+                    if (avgKneeAngle > 165 && bodyHeight > 0.32 && !handsLow) {
+                        // Verify all phases were completed
+                        if (phasesCompleted.squat && phasesCompleted.plank && phasesCompleted.comingUp) {
+                            changePhase('standing');
+                            
+                            // COUNT THE BURPEE - ONLY HERE!
+                            burpeeCount++;
+                            countElement.textContent = burpeeCount;
+                            statusElement.textContent = '✅ BURPEE COMPLETE! 🎉';
+                            statusElement.style.color = '#51cf66';
 
-                        // Celebration effect
-                        countElement.style.transform = 'scale(1.3)';
-                        setTimeout(() => {
-                            countElement.style.transform = 'scale(1)';
-                            statusElement.textContent = 'Ready for next one!';
-                            statusElement.style.color = '#666';
-                        }, 800);
+                            // Reset phase tracking for next burpee
+                            resetPhaseTracking();
+
+                            // Celebration effect
+                            countElement.style.transform = 'scale(1.3)';
+                            setTimeout(() => {
+                                countElement.style.transform = 'scale(1)';
+                                statusElement.textContent = 'Ready for next one!';
+                                statusElement.style.color = '#666';
+                            }, 800);
+                        } else {
+                            // Incomplete burpee - no count
+                            changePhase('standing');
+                            resetPhaseTracking();
+                            statusElement.textContent = 'Incomplete burpee - no count';
+                            statusElement.style.color = '#ff8787';
+                        }
                     }
-                    // If they go back to plank, reset to plank phase
+                    // If they go back to plank, keep tracking
                     else if (isHorizontal && handsLow) {
                         changePhase('plank');
-                        statusElement.textContent = 'Back to plank...';
+                        statusElement.textContent = 'Hold plank position...';
                         statusElement.style.color = '#ff6b6b';
                     }
                     break;
@@ -454,6 +481,12 @@
             currentPhase = newPhase;
             phaseStartTime = Date.now();
             updatePhaseIndicator(newPhase);
+        }
+
+        function resetPhaseTracking() {
+            phasesCompleted.squat = false;
+            phasesCompleted.plank = false;
+            phasesCompleted.comingUp = false;
         }
 
         async function startCamera() {
@@ -514,6 +547,7 @@
             countElement.textContent = '0';
             currentPhase = 'standing';
             phaseStartTime = Date.now();
+            resetPhaseTracking();
             updatePhaseIndicator('standing');
             statusElement.textContent = cameraStarted ? 'Ready...' : 'Get ready...';
             statusElement.style.color = '#666';
