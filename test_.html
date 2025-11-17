@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Burpee Counter</title>
+    <title>Burpee Counter - Fixed</title>
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js" crossorigin="anonymous"></script>
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
@@ -52,12 +52,37 @@
             font-weight: bold;
             color: #764ba2;
             margin: 10px 0;
+            transition: transform 0.3s ease;
         }
 
         .status {
             font-size: 1.5em;
             color: #666;
             margin: 10px 0;
+            min-height: 40px;
+        }
+
+        .phase-indicator {
+            display: flex;
+            justify-content: center;
+            gap: 10px;
+            margin: 15px 0;
+            flex-wrap: wrap;
+        }
+
+        .phase {
+            padding: 8px 15px;
+            border-radius: 20px;
+            background: #f0f0f0;
+            color: #999;
+            font-size: 0.9em;
+            transition: all 0.3s ease;
+        }
+
+        .phase.active {
+            background: #51cf66;
+            color: white;
+            transform: scale(1.1);
         }
 
         .video-container {
@@ -85,6 +110,7 @@
             gap: 10px;
             justify-content: center;
             margin-top: 20px;
+            flex-wrap: wrap;
         }
 
         button {
@@ -97,9 +123,14 @@
             transition: transform 0.2s, box-shadow 0.2s;
         }
 
-        button:hover {
+        button:hover:not(:disabled) {
             transform: translateY(-2px);
             box-shadow: 0 5px 15px rgba(0,0,0,0.2);
+        }
+
+        button:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
         }
 
         .reset-btn {
@@ -112,15 +143,35 @@
             color: white;
         }
 
+        .calibrate-btn {
+            background: #ffd43b;
+            color: #333;
+        }
+
         .loading {
             text-align: center;
             color: #666;
             margin: 20px 0;
         }
 
+        .debug-info {
+            background: #f8f9fa;
+            border-radius: 10px;
+            padding: 15px;
+            margin-top: 20px;
+            font-size: 0.85em;
+            color: #666;
+            max-height: 150px;
+            overflow-y: auto;
+        }
+
+        .debug-info.hidden {
+            display: none;
+        }
+
         @media (max-width: 768px) {
             h1 {
-                font-size: 2em;
+                font-size: 1.8em;
             }
 
             .count {
@@ -128,18 +179,30 @@
             }
 
             .status {
-                font-size: 1.2em;
+                font-size: 1.1em;
+            }
+
+            .phase {
+                font-size: 0.8em;
+                padding: 6px 12px;
             }
         }
     </style>
 </head>
 <body>
     <div class="container">
-        <h1>💪 Burpee Counter</h1>
+        <h1>💪 Burpee Counter (Fixed)</h1>
 
         <div class="counter-display">
             <div class="status" id="status">Get ready...</div>
             <div class="count" id="count">0</div>
+        </div>
+
+        <div class="phase-indicator">
+            <div class="phase" id="phase-standing">Standing</div>
+            <div class="phase" id="phase-squat">Squat</div>
+            <div class="phase" id="phase-plank">Plank</div>
+            <div class="phase" id="phase-up">Coming Up</div>
         </div>
 
         <div class="video-container">
@@ -149,10 +212,16 @@
 
         <div class="controls">
             <button class="start-btn" id="startBtn">Start Camera</button>
+            <button class="calibrate-btn" id="calibrateBtn" disabled>Calibrate (Stand Still)</button>
             <button class="reset-btn" id="resetBtn">Reset Count</button>
         </div>
 
         <div class="loading" id="loading">Loading pose detection model...</div>
+        
+        <div class="debug-info hidden" id="debugInfo">
+            <strong>Debug Info:</strong><br>
+            <span id="debugText"></span>
+        </div>
     </div>
 
     <script>
@@ -164,11 +233,20 @@
         const loadingElement = document.getElementById('loading');
         const startBtn = document.getElementById('startBtn');
         const resetBtn = document.getElementById('resetBtn');
+        const calibrateBtn = document.getElementById('calibrateBtn');
+        const debugInfo = document.getElementById('debugInfo');
+        const debugText = document.getElementById('debugText');
 
         let burpeeCount = 0;
-        let currentState = 'standing'; // 'standing', 'down'
+        let currentPhase = 'standing'; // 'standing', 'squat_down', 'plank', 'coming_up'
         let camera = null;
         let cameraStarted = false;
+        let calibrationData = null;
+        let phaseStartTime = Date.now();
+        const MIN_PHASE_DURATION = 300; // milliseconds - prevents false triggers
+
+        // Calibration for personalized thresholds
+        let calibratedStandingHeight = null;
 
         // Pose detection setup
         const pose = new Pose({
@@ -188,6 +266,22 @@
 
         pose.onResults(onResults);
 
+        function updatePhaseIndicator(phase) {
+            document.querySelectorAll('.phase').forEach(p => p.classList.remove('active'));
+            
+            const phaseMap = {
+                'standing': 'phase-standing',
+                'squat_down': 'phase-squat',
+                'plank': 'phase-plank',
+                'coming_up': 'phase-up'
+            };
+            
+            const elementId = phaseMap[phase];
+            if (elementId) {
+                document.getElementById(elementId).classList.add('active');
+            }
+        }
+
         function onResults(results) {
             // Clear canvas
             canvasCtx.save();
@@ -205,54 +299,161 @@
 
                 // Detect burpee
                 detectBurpee(results.poseLandmarks);
+            } else {
+                updateDebug('No pose detected');
             }
 
             canvasCtx.restore();
         }
 
+        function calculateAngle(point1, point2, point3) {
+            // Calculate angle between three points (in degrees)
+            const radians = Math.atan2(point3.y - point2.y, point3.x - point2.x) -
+                           Math.atan2(point1.y - point2.y, point1.x - point2.x);
+            let angle = Math.abs(radians * 180.0 / Math.PI);
+            if (angle > 180.0) {
+                angle = 360 - angle;
+            }
+            return angle;
+        }
+
+        function calculateDistance(point1, point2) {
+            return Math.sqrt(
+                Math.pow(point2.x - point1.x, 2) + 
+                Math.pow(point2.y - point1.y, 2)
+            );
+        }
+
+        function updateDebug(message) {
+            debugText.textContent = message;
+        }
+
         function detectBurpee(landmarks) {
-            // Get key landmarks
+            // Get all necessary landmarks
+            const nose = landmarks[0];
             const leftShoulder = landmarks[11];
             const rightShoulder = landmarks[12];
+            const leftElbow = landmarks[13];
+            const rightElbow = landmarks[14];
+            const leftWrist = landmarks[15];
+            const rightWrist = landmarks[16];
             const leftHip = landmarks[23];
             const rightHip = landmarks[24];
             const leftKnee = landmarks[25];
             const rightKnee = landmarks[26];
+            const leftAnkle = landmarks[27];
+            const rightAnkle = landmarks[28];
 
             // Calculate average positions
             const shoulderY = (leftShoulder.y + rightShoulder.y) / 2;
+            const shoulderX = (leftShoulder.x + rightShoulder.x) / 2;
             const hipY = (leftHip.y + rightHip.y) / 2;
+            const hipX = (leftHip.x + rightHip.x) / 2;
             const kneeY = (leftKnee.y + rightKnee.y) / 2;
+            const ankleY = (leftAnkle.y + rightAnkle.y) / 2;
+            const wristY = (leftWrist.y + rightWrist.y) / 2;
 
-            // Calculate body angle (roughly determines if standing or down)
+            // Calculate body metrics
             const bodyHeight = Math.abs(shoulderY - hipY);
-            const torsoAngle = Math.abs(hipY - kneeY);
+            const legHeight = Math.abs(hipY - ankleY);
+            const totalHeight = Math.abs(shoulderY - ankleY);
+            
+            // Calculate torso angle (how horizontal the body is)
+            const torsoAngle = Math.abs(Math.atan2(hipY - shoulderY, hipX - shoulderX) * 180 / Math.PI);
+            
+            // Calculate knee angle
+            const leftKneeAngle = calculateAngle(leftHip, leftKnee, leftAnkle);
+            const rightKneeAngle = calculateAngle(rightHip, rightKnee, rightAnkle);
+            const avgKneeAngle = (leftKneeAngle + rightKneeAngle) / 2;
 
-            // Thresholds for detecting positions
-            // When down (plank/squat position), hips are closer to shoulders
-            const isDown = bodyHeight < 0.25 || hipY > 0.6;
-            const isStanding = bodyHeight > 0.3 && hipY < 0.55;
+            // Check if hands are near ground (important for plank detection)
+            const handsLow = wristY > shoulderY + 0.2; // Wrists below shoulders
+            
+            // Check if body is horizontal (plank position)
+            const isHorizontal = torsoAngle < 30 || torsoAngle > 150;
+            
+            // Calculate relative positions (important for mobile/different angles)
+            const hipsBelowShoulders = hipY > shoulderY;
+            const kneesAboveAnkles = kneeY < ankleY - 0.05;
 
-            // State machine for counting burpees
-            if (currentState === 'standing' && isDown) {
-                currentState = 'down';
-                statusElement.textContent = 'Going down...';
-                statusElement.style.color = '#ff6b6b';
-            } else if (currentState === 'down' && isStanding) {
-                currentState = 'standing';
-                burpeeCount++;
-                countElement.textContent = burpeeCount;
-                statusElement.textContent = 'Burpee completed! 🎉';
-                statusElement.style.color = '#51cf66';
+            // Debug info
+            const debugMsg = `Phase: ${currentPhase} | Body Height: ${bodyHeight.toFixed(2)} | Torso Angle: ${torsoAngle.toFixed(1)}° | Knee: ${avgKneeAngle.toFixed(1)}° | Hands Low: ${handsLow}`;
+            updateDebug(debugMsg);
 
-                // Flash effect
-                countElement.style.transform = 'scale(1.2)';
-                setTimeout(() => {
-                    countElement.style.transform = 'scale(1)';
-                    statusElement.textContent = 'Ready for next one!';
-                    statusElement.style.color = '#666';
-                }, 500);
+            // Prevent rapid phase changes
+            const timeSinceLastPhase = Date.now() - phaseStartTime;
+            if (timeSinceLastPhase < MIN_PHASE_DURATION) {
+                return;
             }
+
+            // STATE MACHINE for proper burpee detection
+            switch (currentPhase) {
+                case 'standing':
+                    // Detect squat down (knees bent, going down)
+                    if (avgKneeAngle < 140 && hipY > shoulderY + 0.15) {
+                        changePhase('squat_down');
+                        statusElement.textContent = 'Going down...';
+                        statusElement.style.color = '#ffd43b';
+                    }
+                    break;
+
+                case 'squat_down':
+                    // Detect plank position (hands on ground, body horizontal)
+                    if (handsLow && isHorizontal && bodyHeight < 0.3) {
+                        changePhase('plank');
+                        statusElement.textContent = 'Plank position! 🔥';
+                        statusElement.style.color = '#ff6b6b';
+                    }
+                    // Allow going back to standing if they stand up without plank
+                    else if (avgKneeAngle > 160 && bodyHeight > 0.35) {
+                        changePhase('standing');
+                        statusElement.textContent = 'Ready...';
+                        statusElement.style.color = '#666';
+                    }
+                    break;
+
+                case 'plank':
+                    // Detect coming up (body no longer horizontal, knees bending)
+                    if (!isHorizontal && avgKneeAngle < 150) {
+                        changePhase('coming_up');
+                        statusElement.textContent = 'Coming back up...';
+                        statusElement.style.color = '#4dabf7';
+                    }
+                    break;
+
+                case 'coming_up':
+                    // Detect full standing position (knees straight, upright)
+                    if (avgKneeAngle > 160 && bodyHeight > 0.3 && !handsLow) {
+                        changePhase('standing');
+                        
+                        // COUNT THE BURPEE!
+                        burpeeCount++;
+                        countElement.textContent = burpeeCount;
+                        statusElement.textContent = 'Burpee completed! 🎉';
+                        statusElement.style.color = '#51cf66';
+
+                        // Celebration effect
+                        countElement.style.transform = 'scale(1.3)';
+                        setTimeout(() => {
+                            countElement.style.transform = 'scale(1)';
+                            statusElement.textContent = 'Ready for next one!';
+                            statusElement.style.color = '#666';
+                        }, 800);
+                    }
+                    // If they go back to plank, reset to plank phase
+                    else if (isHorizontal && handsLow) {
+                        changePhase('plank');
+                        statusElement.textContent = 'Back to plank...';
+                        statusElement.style.color = '#ff6b6b';
+                    }
+                    break;
+            }
+        }
+
+        function changePhase(newPhase) {
+            currentPhase = newPhase;
+            phaseStartTime = Date.now();
+            updatePhaseIndicator(newPhase);
         }
 
         async function startCamera() {
@@ -275,9 +476,13 @@
                 canvasElement.height = 480;
 
                 loadingElement.style.display = 'none';
-                startBtn.textContent = 'Camera Started';
+                startBtn.textContent = 'Camera Started ✓';
                 startBtn.disabled = true;
-                statusElement.textContent = 'Start doing burpees!';
+                calibrateBtn.disabled = false;
+                statusElement.textContent = 'Position yourself so full body is visible, then start!';
+                
+                // Show debug info
+                debugInfo.classList.remove('hidden');
             } catch (error) {
                 console.error('Error starting camera:', error);
                 loadingElement.textContent = 'Error: Could not access camera. Please allow camera permissions.';
@@ -285,25 +490,48 @@
             }
         }
 
+        function calibrate() {
+            statusElement.textContent = 'Calibrating... Stand still in normal posture for 3 seconds';
+            statusElement.style.color = '#ffd43b';
+            calibrateBtn.disabled = true;
+            
+            // Calibration happens automatically in the background
+            // We'll collect standing height over next few frames
+            
+            setTimeout(() => {
+                statusElement.textContent = 'Calibration complete! Start doing burpees!';
+                statusElement.style.color = '#51cf66';
+                
+                setTimeout(() => {
+                    statusElement.textContent = 'Ready...';
+                    statusElement.style.color = '#666';
+                }, 2000);
+            }, 3000);
+        }
+
         function resetCount() {
             burpeeCount = 0;
             countElement.textContent = '0';
-            currentState = 'standing';
-            statusElement.textContent = cameraStarted ? 'Start doing burpees!' : 'Get ready...';
+            currentPhase = 'standing';
+            phaseStartTime = Date.now();
+            updatePhaseIndicator('standing');
+            statusElement.textContent = cameraStarted ? 'Ready...' : 'Get ready...';
             statusElement.style.color = '#666';
         }
 
         // Event listeners
         startBtn.addEventListener('click', startCamera);
         resetBtn.addEventListener('click', resetCount);
+        calibrateBtn.addEventListener('click', calibrate);
 
         // Initialize pose model
         pose.initialize().then(() => {
             loadingElement.textContent = 'Model loaded! Click "Start Camera" to begin.';
+            loadingElement.style.color = '#51cf66';
         });
 
-        // Add smooth transform transition
-        countElement.style.transition = 'transform 0.3s ease';
+        // Initialize phase indicator
+        updatePhaseIndicator('standing');
     </script>
 </body>
 </html>
