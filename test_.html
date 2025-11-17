@@ -196,6 +196,9 @@
         <div class="counter-display">
             <div class="status" id="status">Get ready...</div>
             <div class="count" id="count">0</div>
+            <div style="font-size: 0.85em; color: #888; margin-top: 10px;">
+                Full burpee: Squat → Plank (hands + chest to ground) → Stand
+            </div>
         </div>
 
         <div class="phase-indicator">
@@ -244,6 +247,7 @@
         let calibrationData = null;
         let phaseStartTime = Date.now();
         const MIN_PHASE_DURATION = 500; // milliseconds - increased to prevent false triggers
+        const MIN_PLANK_DURATION = 800; // Plank must be held longer to count as valid
         
         // Track which phases were completed in current burpee cycle
         let phasesCompleted = {
@@ -373,18 +377,25 @@
             const rightKneeAngle = calculateAngle(rightHip, rightKnee, rightAnkle);
             const avgKneeAngle = (leftKneeAngle + rightKneeAngle) / 2;
 
-            // Check if hands are near ground (important for plank detection)
-            const handsLow = wristY > shoulderY + 0.25; // Stricter - wrists must be well below shoulders
+            // Check if hands are REALLY near ground (critical for plank detection)
+            // Wrists should be at similar level to ankles in true plank
+            const wristToAnkleDistance = Math.abs(wristY - ankleY);
+            const handsLow = wristY > hipY && wristToAnkleDistance < 0.15; // Hands must be at ankle level
             
-            // Check if body is horizontal (plank position) - stricter angle requirement
-            const isHorizontal = (torsoAngle < 25 || torsoAngle > 155) && bodyHeight < 0.25;
+            // Check if body is REALLY horizontal (plank position) - very strict
+            // Body must be nearly flat AND shoulders close to hip level
+            const bodyIsFlat = Math.abs(shoulderY - hipY) < 0.15; // Torso very flat
+            const isHorizontal = bodyIsFlat && bodyHeight < 0.2 && handsLow;
             
             // Calculate relative positions (important for mobile/different angles)
             const hipsBelowShoulders = hipY > shoulderY;
             const kneesAboveAnkles = kneeY < ankleY - 0.05;
+            
+            // Additional check: nose should be low (near ground) in plank
+            const noseIsLow = nose.y > shoulderY + 0.1;
 
             // Debug info
-            const debugMsg = `Phase: ${currentPhase} | Completed: [Squat:${phasesCompleted.squat} Plank:${phasesCompleted.plank} Up:${phasesCompleted.comingUp}] | Knee: ${avgKneeAngle.toFixed(1)}° | Torso: ${torsoAngle.toFixed(1)}°`;
+            const debugMsg = `Phase: ${currentPhase} | ✓[${phasesCompleted.squat?'S':''}${phasesCompleted.plank?'P':''}${phasesCompleted.comingUp?'U':''}] | Knee: ${avgKneeAngle.toFixed(0)}° | Plank: Flat:${bodyIsFlat} Hands:${handsLow} Nose:${noseIsLow}`;
             updateDebug(debugMsg);
 
             // Prevent rapid phase changes
@@ -407,16 +418,28 @@
                     break;
 
                 case 'squat_down':
-                    // Detect plank position (hands on ground, body horizontal)
-                    // Must have ALL conditions: hands low, horizontal body, AND small body height
-                    if (handsLow && isHorizontal && phasesCompleted.squat) {
+                    // Detect plank position - VERY STRICT REQUIREMENTS
+                    // Must have ALL conditions: hands at ground level, body flat, nose low
+                    if (isHorizontal && noseIsLow && phasesCompleted.squat) {
                         changePhase('plank');
                         phasesCompleted.plank = true;
                         statusElement.textContent = 'Plank position! 🔥 (2/3)';
                         statusElement.style.color = '#ff6b6b';
                     }
+                    // Give feedback on what's needed for plank
+                    else if (timeSinceLastPhase > 1000) {
+                        let missing = [];
+                        if (!bodyIsFlat) missing.push('body flat');
+                        if (!handsLow) missing.push('hands down');
+                        if (!noseIsLow) missing.push('head down');
+                        
+                        if (missing.length > 0) {
+                            statusElement.textContent = `Need: ${missing.join(', ')}`;
+                            statusElement.style.color = '#ffa94d';
+                        }
+                    }
                     // Allow going back to standing if they stand up without plank (RESET - no count)
-                    else if (avgKneeAngle > 165 && bodyHeight > 0.32) {
+                    if (avgKneeAngle > 165 && bodyHeight > 0.32 && !handsLow) {
                         changePhase('standing');
                         resetPhaseTracking();
                         statusElement.textContent = 'Incomplete - try again';
@@ -425,20 +448,30 @@
                     break;
 
                 case 'plank':
+                    // Must hold plank for minimum duration before progressing
+                    const timeInPlank = Date.now() - phaseStartTime;
+                    
                     // Detect coming up (body no longer horizontal, knees bending)
-                    if (!isHorizontal && avgKneeAngle < 145 && phasesCompleted.plank) {
+                    // But ONLY if plank was held long enough
+                    if (!isHorizontal && avgKneeAngle < 145 && phasesCompleted.plank && timeInPlank >= MIN_PLANK_DURATION) {
                         changePhase('coming_up');
                         phasesCompleted.comingUp = true;
                         statusElement.textContent = 'Coming back up... (3/3)';
                         statusElement.style.color = '#4dabf7';
+                    } else if (!isHorizontal && timeInPlank < MIN_PLANK_DURATION) {
+                        // Not held long enough - show warning
+                        statusElement.textContent = `Hold plank! (${Math.ceil((MIN_PLANK_DURATION - timeInPlank) / 1000)}s)`;
+                        statusElement.style.color = '#ffa94d';
                     }
                     break;
 
                 case 'coming_up':
-                    // Detect full standing position (knees straight, upright)
+                    // Detect full standing position (knees straight, upright, hands up)
                     // ONLY COUNT if ALL phases were completed
-                    // Stricter: knees must be > 165 degrees (nearly straight)
-                    if (avgKneeAngle > 165 && bodyHeight > 0.32 && !handsLow) {
+                    // Stricter: knees must be > 165 degrees (nearly straight) AND hands must be high
+                    const handsAreUp = wristY < shoulderY; // Wrists above shoulders = standing
+                    
+                    if (avgKneeAngle > 165 && bodyHeight > 0.32 && handsAreUp && !handsLow) {
                         // Verify all phases were completed
                         if (phasesCompleted.squat && phasesCompleted.plank && phasesCompleted.comingUp) {
                             changePhase('standing');
@@ -468,7 +501,7 @@
                         }
                     }
                     // If they go back to plank, keep tracking
-                    else if (isHorizontal && handsLow) {
+                    else if (isHorizontal && handsLow && !handsAreUp) {
                         changePhase('plank');
                         statusElement.textContent = 'Hold plank position...';
                         statusElement.style.color = '#ff6b6b';
