@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Burpee Counter</title>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/pose/pose.js" crossorigin="anonymous"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Arial', sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }
+
+        .container {
+            background: white;
+            border-radius: 20px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+            padding: 30px;
+            max-width: 900px;
+            width: 100%;
+        }
+
+        h1 {
+            text-align: center;
+            color: #667eea;
+            margin-bottom: 20px;
+            font-size: 2.5em;
+        }
+
+        .counter-display {
+            text-align: center;
+            margin-bottom: 20px;
+        }
+
+        .count {
+            font-size: 4em;
+            font-weight: bold;
+            color: #764ba2;
+            margin: 10px 0;
+        }
+
+        .status {
+            font-size: 1.5em;
+            color: #666;
+            margin: 10px 0;
+        }
+
+        .video-container {
+            position: relative;
+            width: 100%;
+            max-width: 640px;
+            margin: 0 auto;
+            border-radius: 10px;
+            overflow: hidden;
+            background: #000;
+        }
+
+        #video {
+            display: none;
+        }
+
+        #canvas {
+            width: 100%;
+            height: auto;
+            display: block;
+        }
+
+        .controls {
+            display: flex;
+            gap: 10px;
+            justify-content: center;
+            margin-top: 20px;
+        }
+
+        button {
+            padding: 12px 30px;
+            font-size: 1em;
+            border: none;
+            border-radius: 25px;
+            cursor: pointer;
+            font-weight: bold;
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+
+        button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(0,0,0,0.2);
+        }
+
+        .reset-btn {
+            background: #ff6b6b;
+            color: white;
+        }
+
+        .start-btn {
+            background: #51cf66;
+            color: white;
+        }
+
+        .loading {
+            text-align: center;
+            color: #666;
+            margin: 20px 0;
+        }
+
+        @media (max-width: 768px) {
+            h1 {
+                font-size: 2em;
+            }
+
+            .count {
+                font-size: 3em;
+            }
+
+            .status {
+                font-size: 1.2em;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>💪 Burpee Counter</h1>
+
+        <div class="counter-display">
+            <div class="status" id="status">Get ready...</div>
+            <div class="count" id="count">0</div>
+        </div>
+
+        <div class="video-container">
+            <video id="video" autoplay playsinline></video>
+            <canvas id="canvas"></canvas>
+        </div>
+
+        <div class="controls">
+            <button class="start-btn" id="startBtn">Start Camera</button>
+            <button class="reset-btn" id="resetBtn">Reset Count</button>
+        </div>
+
+        <div class="loading" id="loading">Loading pose detection model...</div>
+    </div>
+
+    <script>
+        const videoElement = document.getElementById('video');
+        const canvasElement = document.getElementById('canvas');
+        const canvasCtx = canvasElement.getContext('2d');
+        const countElement = document.getElementById('count');
+        const statusElement = document.getElementById('status');
+        const loadingElement = document.getElementById('loading');
+        const startBtn = document.getElementById('startBtn');
+        const resetBtn = document.getElementById('resetBtn');
+
+        let burpeeCount = 0;
+        let currentState = 'standing'; // 'standing', 'down'
+        let camera = null;
+        let cameraStarted = false;
+
+        // Pose detection setup
+        const pose = new Pose({
+            locateFile: (file) => {
+                return `https://cdn.jsdelivr.net/npm/@mediapipe/pose/${file}`;
+            }
+        });
+
+        pose.setOptions({
+            modelComplexity: 1,
+            smoothLandmarks: true,
+            enableSegmentation: false,
+            smoothSegmentation: false,
+            minDetectionConfidence: 0.5,
+            minTrackingConfidence: 0.5
+        });
+
+        pose.onResults(onResults);
+
+        function onResults(results) {
+            // Clear canvas
+            canvasCtx.save();
+            canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+
+            // Draw video frame
+            canvasCtx.drawImage(results.image, 0, 0, canvasElement.width, canvasElement.height);
+
+            if (results.poseLandmarks) {
+                // Draw pose landmarks
+                drawConnectors(canvasCtx, results.poseLandmarks, POSE_CONNECTIONS,
+                    {color: '#00FF00', lineWidth: 4});
+                drawLandmarks(canvasCtx, results.poseLandmarks,
+                    {color: '#FF0000', lineWidth: 2, radius: 6});
+
+                // Detect burpee
+                detectBurpee(results.poseLandmarks);
+            }
+
+            canvasCtx.restore();
+        }
+
+        function detectBurpee(landmarks) {
+            // Get key landmarks
+            const leftShoulder = landmarks[11];
+            const rightShoulder = landmarks[12];
+            const leftHip = landmarks[23];
+            const rightHip = landmarks[24];
+            const leftKnee = landmarks[25];
+            const rightKnee = landmarks[26];
+
+            // Calculate average positions
+            const shoulderY = (leftShoulder.y + rightShoulder.y) / 2;
+            const hipY = (leftHip.y + rightHip.y) / 2;
+            const kneeY = (leftKnee.y + rightKnee.y) / 2;
+
+            // Calculate body angle (roughly determines if standing or down)
+            const bodyHeight = Math.abs(shoulderY - hipY);
+            const torsoAngle = Math.abs(hipY - kneeY);
+
+            // Thresholds for detecting positions
+            // When down (plank/squat position), hips are closer to shoulders
+            const isDown = bodyHeight < 0.25 || hipY > 0.6;
+            const isStanding = bodyHeight > 0.3 && hipY < 0.55;
+
+            // State machine for counting burpees
+            if (currentState === 'standing' && isDown) {
+                currentState = 'down';
+                statusElement.textContent = 'Going down...';
+                statusElement.style.color = '#ff6b6b';
+            } else if (currentState === 'down' && isStanding) {
+                currentState = 'standing';
+                burpeeCount++;
+                countElement.textContent = burpeeCount;
+                statusElement.textContent = 'Burpee completed! 🎉';
+                statusElement.style.color = '#51cf66';
+
+                // Flash effect
+                countElement.style.transform = 'scale(1.2)';
+                setTimeout(() => {
+                    countElement.style.transform = 'scale(1)';
+                    statusElement.textContent = 'Ready for next one!';
+                    statusElement.style.color = '#666';
+                }, 500);
+            }
+        }
+
+        async function startCamera() {
+            if (cameraStarted) return;
+
+            try {
+                camera = new Camera(videoElement, {
+                    onFrame: async () => {
+                        await pose.send({image: videoElement});
+                    },
+                    width: 640,
+                    height: 480
+                });
+
+                await camera.start();
+                cameraStarted = true;
+
+                // Set canvas size
+                canvasElement.width = 640;
+                canvasElement.height = 480;
+
+                loadingElement.style.display = 'none';
+                startBtn.textContent = 'Camera Started';
+                startBtn.disabled = true;
+                statusElement.textContent = 'Start doing burpees!';
+            } catch (error) {
+                console.error('Error starting camera:', error);
+                loadingElement.textContent = 'Error: Could not access camera. Please allow camera permissions.';
+                loadingElement.style.color = '#ff6b6b';
+            }
+        }
+
+        function resetCount() {
+            burpeeCount = 0;
+            countElement.textContent = '0';
+            currentState = 'standing';
+            statusElement.textContent = cameraStarted ? 'Start doing burpees!' : 'Get ready...';
+            statusElement.style.color = '#666';
+        }
+
+        // Event listeners
+        startBtn.addEventListener('click', startCamera);
+        resetBtn.addEventListener('click', resetCount);
+
+        // Initialize pose model
+        pose.initialize().then(() => {
+            loadingElement.textContent = 'Model loaded! Click "Start Camera" to begin.';
+        });
+
+        // Add smooth transform transition
+        countElement.style.transition = 'transform 0.3s ease';
+    </script>
+</body>
+</html>
